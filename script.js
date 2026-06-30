@@ -18,10 +18,10 @@ const DISK_OUTER_RADIUS    = 3.20;  // outer edge of accretion disk
 const KEPLERIAN_K          = 0.78;  // angular speed at r=1 (rad/s)
 const SPIRAL_RATE_MIN      = 0.005; // slowest inward drift (units/s)
 const SPIRAL_RATE_MAX      = 0.025; // fastest inward drift (units/s)
-const BLOOM_STRENGTH       = 1.9;
-const BLOOM_RADIUS         = 0.85;
-const BLOOM_THRESHOLD      = 0.10;
-const LENSING_STRENGTH     = 0.0035;
+const BLOOM_STRENGTH       = 0.85;
+const BLOOM_RADIUS         = 0.50;
+const BLOOM_THRESHOLD      = 0.65;  // only the photon ring (≥1.0) gets heavy bloom
+const LENSING_STRENGTH     = 0.0015;
 
 // ============================================================
 // === RENDERER
@@ -30,7 +30,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.0;
+renderer.toneMappingExposure = 0.80;
 document.body.appendChild(renderer.domElement);
 
 // ============================================================
@@ -67,7 +67,8 @@ const lensingPass = new ShaderPass({
     tDiffuse:  { value: null },
     uCenter:   { value: new THREE.Vector2(0.5, 0.5) },
     uStrength: { value: LENSING_STRENGTH },
-    uAspect:   { value: window.innerWidth / window.innerHeight }
+    uAspect:   { value: window.innerWidth / window.innerHeight },
+    uShadowR:  { value: 0.10 }  // event-horizon shadow radius in aspect-corrected UV space
   },
   vertexShader: /* glsl */`
     varying vec2 vUv;
@@ -81,6 +82,7 @@ const lensingPass = new ShaderPass({
     uniform vec2  uCenter;
     uniform float uStrength;
     uniform float uAspect;
+    uniform float uShadowR;
     varying vec2 vUv;
 
     void main() {
@@ -91,6 +93,13 @@ const lensingPass = new ShaderPass({
       vec2 physDelta = vec2(delta.x * uAspect, delta.y);
       float dist = length(physDelta);
 
+      // Hard black mask: forces the shadow interior pitch-black after bloom.
+      // This prevents the photon-ring glow from bleeding into the event horizon.
+      if (dist < uShadowR) {
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+      }
+
       if (dist < 0.001) {
         gl_FragColor = texture2D(tDiffuse, uv);
         return;
@@ -98,7 +107,7 @@ const lensingPass = new ShaderPass({
 
       // Warp magnitude: stronger closer to center (1/d^2 falloff)
       float warp = uStrength / (dist * dist + 0.005);
-      warp = clamp(warp, 0.0, 0.12);
+      warp = clamp(warp, 0.0, 0.05);  // tight cap prevents smearing bright ring across screen
 
       // Direction in UV space (undo aspect correction for the offset)
       vec2 dir = physDelta / dist;
@@ -185,19 +194,21 @@ const diskFragSrc = /* glsl */`
   void main() {
     float t = vNorm;
 
-    // Bright inner core, fading to dark outer rim
-    float core = (1.0 - smoothstep(0.0, 0.10, t)) * 2.2;
-    float glow = (1.0 - smoothstep(0.0, 0.65, t)) * 0.75;
+    // Bright inner core, fading to dark outer rim.
+    // Values kept well below 1.0 so the disk doesn't trigger bloom —
+    // only the photon ring tori (opacity 1.0, additive) should bloom.
+    float core = (1.0 - smoothstep(0.0, 0.10, t)) * 0.60;
+    float glow = (1.0 - smoothstep(0.0, 0.65, t)) * 0.32;
 
     // Animated hot bands that rotate around the disk
-    float shimmer = sin(vAngle * 6.0 + uTime * 0.40) * 0.14
-                  + sin(vAngle * 13.0 - uTime * 0.65) * 0.07
-                  + sin(vAngle * 2.5  + uTime * 0.15) * 0.05;
+    float shimmer = sin(vAngle * 6.0 + uTime * 0.40) * 0.06
+                  + sin(vAngle * 13.0 - uTime * 0.65) * 0.03
+                  + sin(vAngle * 2.5  + uTime * 0.15) * 0.02;
     shimmer *= (1.0 - t); // shimmer only visible near inner edge
 
     float brightness = core + glow + shimmer;
     float alpha      = (1.0 - smoothstep(0.55, 1.0, t))
-                     * clamp(brightness * 0.65, 0.0, 1.0);
+                     * clamp(brightness * 1.20, 0.0, 0.90);
 
     gl_FragColor = vec4(vec3(brightness), alpha);
   }
@@ -264,7 +275,7 @@ const backRing = new THREE.Mesh(
   new THREE.MeshBasicMaterial({
     color: 0xffffff,
     transparent: true,
-    opacity: 0.55,
+    opacity: 0.40,
     blending: THREE.AdditiveBlending,
     depthWrite: false
   })
@@ -300,7 +311,7 @@ function initParticle(i, r) {
 
   // Brightness: white near center, dim gray further out
   const normR = (r - DISK_INNER_RADIUS) / (DISK_OUTER_RADIUS - DISK_INNER_RADIUS);
-  const b = 0.20 + (1.0 - normR) * 0.80;
+  const b = 0.07 + (1.0 - normR) * 0.33; // max 0.40 — additive blending of 7k particles sums fast
   pColors[i * 3] = b; pColors[i * 3 + 1] = b; pColors[i * 3 + 2] = b;
 }
 
@@ -322,7 +333,7 @@ const particleMat = new THREE.PointsMaterial({
   sizeAttenuation: true,
   vertexColors: true,
   transparent: true,
-  opacity: 0.88,
+  opacity: 0.28,
   blending: THREE.AdditiveBlending,
   depthWrite: false
 });
